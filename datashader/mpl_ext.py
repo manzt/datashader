@@ -10,28 +10,34 @@ from .core import bypixel
 
 def uint32_to_uint8(img):
     """Cast uint32 RGB image to 4 uint8 channels."""
-    return np.flipud(img.view(dtype=np.uint8).reshape(img.shape + (4,)))
-
-
-def uint8_to_uint32(img):
-    """Cast 4 uint8 channels into uint32 RGB image"""
-    return img.view(dtype=np.uint32).reshape(img.shape[:-1])
+    return img.view(dtype=np.uint8).reshape(img.shape + (4,))
 
 
 class DSArtist(mimage._ImageBase):
-    def __init__(self, ax, pipeline, extent=None, **kwargs):
-        super().__init__(ax, **kwargs)
+    def __init__(
+        self,
+        ax,
+        pipeline,
+        initial_x_range=None,
+        initial_y_range=None,
+        origin="lower",
+        **kwargs
+    ):
+        super().__init__(ax, origin=origin, **kwargs)
         self.pipeline = pipeline
+        df = self.pipeline.df
 
-        if extent is not None:
-            ax.set_ylim(extent[0], extent[1])
-            ax.set_xlim(extent[2], extent[3])
+        if initial_x_range is not None:
+            ax.set_xlim(initial_x_range)
         else:
             x_col = self.pipeline.glyph.x_label
-            y_col = self.pipeline.glyph.y_label
-            df = self.pipeline.df
-            ax.set_ylim((df[y_col].min(), df[y_col].max()))
             ax.set_xlim((df[x_col].min(), df[x_col].max()))
+
+        if initial_y_range is not None:
+            ax.set_ylim(initial_y_range)
+        else:
+            y_col = self.pipeline.glyph.y_label
+            ax.set_ylim((df[y_col].min(), df[y_col].max()))
 
         self.axes = ax
         self.set_array([[1, 1], [1, 1]])
@@ -53,8 +59,13 @@ class DSArtist(mimage._ImageBase):
             x_range=(x1, x2),
             y_range=(y1, y2),
         )
-        bins = bypixel(self.pipeline.df, canvas, self.pipeline.glyph, self.pipeline.agg)
-        bins = self.pipeline.transform_fn(bins)
+        binned = bypixel(
+            self.pipeline.df, canvas, self.pipeline.glyph, self.pipeline.agg
+        )
+        binned = self.pipeline.transform_fn(binned)
+
+        # save the binned data for cursor events
+        self._ds_data = binned.data
 
         # infer the colormap or legend depending on aggregation
         if len(bins.shape) == 3:
@@ -81,16 +92,19 @@ class DSArtist(mimage._ImageBase):
             da.set_cmap(cmap)
 
         # shading part of pipeline
-        img = self.pipeline.color_fn(bins)
+        img = self.pipeline.color_fn(binned)
         img = self.pipeline.spread_fn(img)
-        img = uint32_to_uint8(img.data)
-        img = np.ma.masked_array(img)
 
+        # save the uint32 image DataArray for inspection
+        self._ds_image = img
+
+        rgba = uint32_to_uint8(img.data)
+        rgba = np.ma.masked_array(rgba)
         # self.set_clim(vmin, vmax)
-        self.set_array(img)
+        self.set_array(rgba)
 
         return self._make_image(
-            img,
+            rgba,
             bbox,
             transformed_bbox,
             self.axes.bbox,
@@ -99,19 +113,23 @@ class DSArtist(mimage._ImageBase):
         )
 
     def get_extent(self):
-        return (*self.axes.get_xlim(), *self.axes.get_ylim())
+        (x1, x2), (y1, y2) = self.axes.get_xlim(), self.axes.get_ylim()
+        return x1, x2, y1, y2
 
     def get_cursor_data(self, event):
         """Get the cursor data for a given event"""
         xmin, xmax, ymin, ymax = self.get_extent()
         if self.origin == "upper":
             ymin, ymax = ymax, ymin
-        arr = self.get_array()
+
+        arr = self._ds_data
         data_extent = Bbox([[ymin, xmin], [ymax, xmax]])
         array_extent = Bbox([[0, 0], arr.shape[:2]])
         trans = BboxTransform(boxin=data_extent, boxout=array_extent)
+
         y, x = event.ydata, event.xdata
         i, j = trans.transform_point([y, x]).astype(int)
+
         # Clip the coordinates at array bounds
         if not (0 <= i < arr.shape[0]) or not (0 <= j < arr.shape[1]):
             return None
